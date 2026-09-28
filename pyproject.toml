@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "casedefs"
+version = "0.2.0"
+description = "Apply validated, published health case definitions to administrative health data."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "casedefs contributors" }]
+keywords = ["epidemiology", "case definitions", "administrative data", "ICD-10-CA", "CCDSS", "health services research"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = ["pandas>=2.1", "typer>=0.9"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov>=4", "build"]
+
+[project.scripts]
+casedefs = "casedefs.cli:app"
+
+[project.urls]
+Source = "https://github.com/huznot/casedefs"
+Issues = "https://github.com/huznot/casedefs/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/casedefs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
