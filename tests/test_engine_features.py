@@ -313,7 +313,7 @@ class TestComposite:
 
     def test_warns_without_people(self):
         with pytest.warns(MissingPeopleWarning):
-            apply(self.comp(2), hospital=hospital((1, 0, "A01")))
+            apply(self.comp(2, min_age=35), hospital=hospital((1, 0, "A01"), (1, 5, "B01")))
 
 
 def test_apply_several_and_all():
@@ -329,3 +329,54 @@ def test_apply_several_and_all():
 def test_need_some_input():
     with pytest.raises(CasedefsInputError, match="at least one"):
         apply("ccdss.diabetes")
+
+
+def test_composite_without_ages_does_not_warn():
+    import warnings as w
+    a = make(Rule(1, None), id="test.a", icd10ca=("A01",))
+    b = make(Rule(1, None), id="test.b", icd10ca=("B01",))
+    comp = Composite(id="test.ab", name="ab", version="t1", source_title="t", source_url="https://example.org",
+                     source_location="n/a", verified=True, components=(a, b), min_conditions=2)
+    with w.catch_warnings():
+        w.simplefilter("error")
+        res = apply(comp, hospital=hospital((1, 0, "A01"), (1, 30, "B01"), (2, 0, "A01")))
+    assert ids(res) == {1}
+    assert case_day(res, 1) == 30
+
+
+class TestAmbulatory:
+    defn = make(Rule(None, None, min_ambulatory=2, window_days=365), icd10ca=("X99",))
+
+    def visits(self, *days_):
+        return pd.DataFrame({"person_id": 1, "visit_date": [day(d) for d in days_], "dx_code": "X99"})
+
+    def test_two_visits_in_window(self):
+        assert case_day(apply(self.defn, ambulatory=self.visits(0, 365)), 1) == 365
+
+    def test_window(self):
+        assert apply(self.defn, ambulatory=self.visits(0, 366)).empty
+
+    def test_missing_date_column(self):
+        df = pd.DataFrame({"person_id": [1], "when": [day(0)], "dx_code": ["X99"]})
+        with pytest.raises(CasedefsInputError, match="visit_date"):
+            apply(self.defn, ambulatory=df)
+
+
+def test_hospital_path_window_and_gap():
+    d = make(Rule(2, None, window_days=100, min_days_between=10))
+    assert case_day(apply(d, hospital=hospital((1, 0, "X99"), (1, 10, "X99"))), 1) == 10
+    assert apply(d, hospital=hospital((1, 0, "X99"), (1, 9, "X99"))).empty
+    assert apply(d, hospital=hospital((1, 0, "X99"), (1, 101, "X99"))).empty
+
+
+def test_person_exclusion():
+    from casedefs import PersonExclusion
+    d = make(Rule(1, None), exclusions=(PersonExclusion(name="x", icd9=("123",), icd10ca=("Y12",)),))
+    hosp = hospital((1, 0, "X99"), (2, 0, "X99"), (2, 900, "Y12.3"))
+    assert ids(apply(d, hospital=hosp)) == {1}
+
+
+def test_incomplete_definition_warns():
+    from casedefs import IncompleteDefinitionWarning
+    with pytest.warns(IncompleteDefinitionWarning):
+        apply(make(Rule(1, None), complete=False), hospital=hospital((1, 0, "X99")))

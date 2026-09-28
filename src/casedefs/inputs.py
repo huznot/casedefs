@@ -11,6 +11,7 @@ from .codes import normalize_series
 
 HOSPITAL_DATE_COLUMNS = ("separation_date", "admit_date", "date")
 PROCEDURE_DATE_COLUMNS = ("procedure_date", "date")
+AMBULATORY_DATE_COLUMNS = ("visit_date", "date")
 DRUG_DATE_COLUMNS = ("dispense_date", "date")
 ICD_VERSION_COLUMN = "icd_version"
 PROC_SYSTEM_COLUMN = "proc_system"
@@ -18,6 +19,7 @@ CODINGS = ("icd9", "icd10ca", "both")
 PROCEDURE_CODINGS = ("cci", "ccp", "icd9cm")
 
 EVENT_COLUMNS = ["person_id", "date", "code", "coding", "source", "record_id"]
+CLAIMS_COLUMNS = EVENT_COLUMNS + ["specialty"]
 HOSPITAL_COLUMNS = EVENT_COLUMNS + ["dx_type", "admit_date"]
 
 
@@ -144,12 +146,27 @@ def claims_events(
             "coding": _coding_column(df, coding, "claims"),
         }
     )
+    if "specialty" in df.columns:
+        out["specialty"] = df["specialty"].astype("string").str.strip().str.upper()
+    else:
+        out["specialty"] = pd.Series(pd.NA, index=df.index, dtype="string")
     out = out[out["code"] != ""]
     # identical rows are almost always the same claim loaded twice
     out = out.drop_duplicates(["person_id", "date", "code"]).reset_index(drop=True)
     out["source"] = "claims"
     out["record_id"] = range(len(out))
-    return out[EVENT_COLUMNS]
+    out["code"] = out["code"].astype("category")
+    return out[CLAIMS_COLUMNS]
+
+
+def ambulatory_events(
+    ambulatory: pd.DataFrame,
+    columns: Mapping[str, object] | None = None,
+    coding: str = "icd10ca",
+    date_format: str | None = None,
+) -> pd.DataFrame:
+    """ed and clinic visits (nacrs, accs). same layout as hospital data, dated by visit_date."""
+    return hospital_events(ambulatory, columns, coding, date_format, table="ambulatory")
 
 
 def hospital_events(
@@ -157,6 +174,7 @@ def hospital_events(
     columns: Mapping[str, object] | None = None,
     coding: str = "icd10ca",
     date_format: str | None = None,
+    table: str = "hospital",
 ) -> pd.DataFrame:
     """one row per diagnosis code on a hospital record.
 
@@ -165,18 +183,18 @@ def hospital_events(
     count from admission.
     """
     df = _rename(hospital, columns).reset_index(drop=True)
-    _require(df, ["person_id"], "hospital")
-    date_col = _pick(df, HOSPITAL_DATE_COLUMNS, "hospital")
+    _require(df, ["person_id"], table)
+    date_col = _pick(df, HOSPITAL_DATE_COLUMNS if table == "hospital" else AMBULATORY_DATE_COLUMNS, table)
 
     wide_cols = list(columns.get("hospital_dx_columns", [])) if columns else []
     type_cols = list(columns.get("hospital_dx_type_columns", [])) if columns else []
     if wide_cols:
-        _require(df, wide_cols, "hospital")
+        _require(df, wide_cols, table)
     else:
         wide_cols = _numbered(df, "dx_code")
     if not wide_cols and "dx_code" not in df.columns:
         raise CasedefsInputError(
-            "hospital table needs diagnosis columns: either dx_code (long format, one row per code) "
+            f"{table} table needs diagnosis columns: either dx_code (long format, one row per code) "
             "or dx_code_1, dx_code_2, ... (wide format, one row per stay). "
             f"columns found: {_found(df)}. for other names pass columns={{'hospital_dx_columns': [...]}}"
         )
@@ -184,12 +202,12 @@ def hospital_events(
     base = pd.DataFrame(
         {
             "person_id": df["person_id"],
-            "date": parse_dates(df[date_col], "hospital", date_col, date_format),
-            "coding": _coding_column(df, coding, "hospital"),
+            "date": parse_dates(df[date_col], table, date_col, date_format),
+            "coding": _coding_column(df, coding, table),
         }
     )
     if "admit_date" in df.columns and date_col != "admit_date":
-        base["admit_date"] = _optional_dates(df["admit_date"], "hospital", "admit_date", date_format)
+        base["admit_date"] = _optional_dates(df["admit_date"], table, "admit_date", date_format)
     elif date_col == "admit_date":
         base["admit_date"] = base["date"]
     else:
@@ -199,7 +217,7 @@ def hospital_events(
         # one input row is one hospital stay
         base["record_id"] = range(len(base))
         if type_cols:
-            _require(df, type_cols, "hospital")
+            _require(df, type_cols, table)
             if len(type_cols) != len(wide_cols):
                 raise CasedefsInputError("hospital_dx_type_columns must line up one to one with hospital_dx_columns")
         else:
@@ -220,7 +238,8 @@ def hospital_events(
     long["code"] = normalize_series(long["code"])
     long["dx_type"] = normalize_dx_type(long["dx_type"])
     long = long[long["code"] != ""].copy()
-    long["source"] = "hospital"
+    long["source"] = table
+    long["code"] = long["code"].astype("category")
     return long[HOSPITAL_COLUMNS].sort_values(["record_id"], kind="stable").reset_index(drop=True)
 
 

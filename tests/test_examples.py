@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from casedefs import apply
+from casedefs.registry import all_definitions
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
@@ -33,10 +34,20 @@ def test_example_data_results():
               for n in ["claims", "hospital", "people", "procedures", "drugs"]}
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        res = apply("all", **tables)
+        res = apply([i for i in all_definitions() if i.startswith("ccdss.")], **tables)
     got: dict = {}
     for def_id, person, date in zip(res["definition_id"], res["person_id"], res["case_date"].dt.strftime("%Y-%m-%d")):
         got.setdefault(def_id, {})[person] = date
     for def_id, expected in EXPECTED.items():
         assert got.get(def_id, {}) == expected, def_id
     assert set(got) <= set(EXPECTED)
+
+
+def test_every_definition_runs_on_the_examples():
+    tables = {n: pd.read_csv(EXAMPLES / f"{n}.csv", dtype=str)
+              for n in ["claims", "hospital", "people", "procedures", "drugs"]}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = apply("all", **tables)
+    assert set(res.columns) == {"person_id", "case_date", "definition_id", "definition_version"}
+    assert res["definition_id"].str.startswith(("ccdss.", "tonelli.", "quan.")).all()

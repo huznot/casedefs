@@ -44,13 +44,14 @@ Thanks for helping. The most useful contribution is a new case definition with a
      - `drug_dins` with `Rule(min_drugs=1)` (`dementia.py`)
      - `Composite`: "a case of N of these definitions" (`multimorbidity.py`)
 
-3. The registry finds any module that defines `DEFINITION`, so you don't need to register anything.
+3. The registry finds any module that defines `DEFINITION`, or a `DEFINITIONS` list for a whole source (see `definitions/tonelli/conditions.py`), so you don't need to register anything. For long published lists, write codes as printed and wrap them in `expand_codes("I42.5-I42.9, I43.x, 425.4-425.9")`. It spells out ranges without adding codes.
 4. Add `tests/definitions/test_<condition>.py`. At minimum:
    - a test that checks the codes, rule and ages against the source
    - true cases for each code block, with and without dots
    - near misses: a neighbouring code, one day outside the window, one year under the age limit, an excluded record
-5. Add a row to `docs/sources.md` and to the table in `README.md`.
-6. Run the tests:
+5. Add a section to `docs/sources.md` covering where you read the codes and how you read anything unclear. Then regenerate the catalog with `python -m casedefs.catalog > docs/definitions.md`. A test fails if you forget.
+6. `tests/definitions/test_every_definition.py` automatically checks a true case and a near miss for every definition. Add your own tests for anything special, like windows, gaps, exclusions or specialties.
+7. Run the tests:
 
    ```bash
    pip install -e ".[dev]"

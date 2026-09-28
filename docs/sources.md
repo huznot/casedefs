@@ -83,3 +83,61 @@ The 2019 PHAC article "At-a-glance: Twenty years of diabetes surveillance using 
 - It says diabetes **records are removed** in the window. The spreadsheet says people "cannot qualify" in the window.
 
 casedefs follows the v2024 spreadsheet, the newer and official definitions document. If you need to match results published around 2019, check these three points.
+
+## Tonelli et al. 2015 (Alberta, 30 chronic conditions)
+
+**Source:** Tonelli M, Wiebe N, Fortin M, et al. Methods for identifying 30 chronic conditions: application to administrative data. BMC Med Inform Decis Mak. 2015;15:31.
+- Article: https://bmcmedinformdecismak.biomedcentral.com/articles/10.1186/s12911-015-0155-5
+- Correction, with a corrected Table 1: https://bmcmedinformdecismak.biomedcentral.com/articles/10.1186/s12911-019-0900-2
+- License: open access, CC BY 4.0
+- Read on: 2026-09-28
+
+casedefs uses the **corrected** Table 1. Every code list was copied from it and expanded with `expand_codes`, which only spells out ranges. The corrections that matter here:
+- chronic pain now includes G89.0, G89.2 and G89.4, and says "30 days or more" instead of "or less"
+- myocardial infarction is "1 most responsible hospitalization"
+- the diabetes citation year is fixed
+
+How casedefs reads the table (each point is also in the definition's notes):
+1. "Years" is the window for every path that needs more than one record. 2 years is 730 days, 3 years is 1095, and 1 year is 365.
+2. ACCS records are ambulatory care (ED and clinic) records, passed as `ambulatory=`.
+3. **Chronic pain:** "2 ... in 30 days or more" is read as two records of the same kind at least 30 days apart.
+4. **Hepatitis B:** the ICD-9 codes are printed as "70.2-70.3" and read as 070.2-070.3. 6 months is read as 183 days.
+5. **Atrial fibrillation:** hospital records use 427.31. Claims use 427.3, per the table's footnote.
+6. **Cirrhosis:** needs a cirrhosis code and a decompensation code, each found separately. The case date is when the second one is first seen. 567.81, 567.82 and 789.51 are excluded, and so are 567.22 and 567.23 (footnote).
+7. **Most responsible:** epilepsy, MI and stroke use diagnosis types M (and 2, for stroke hospital records).
+8. **Specialty:** IBD counts GAST and GP claims, and psoriasis counts DERM claims. This needs a `specialty` column.
+9. **Not implemented** (`complete=False`, with a warning when used):
+   - the chronic kidney disease lab path
+   - "hospitalization without surgery" for IBS and severe constipation
+   - the surgery exclusion and conditional exclusions for severe constipation
+
+   The diagnosis exclusions for IBS and constipation are applied to anyone with those codes at any time, because the table doesn't say when they apply.
+10. **Case date:** Tonelli sets the index date to the first relevant claim. casedefs returns the date the rule is first met, like every other definition.
+11. **Remission:** conditions marked "not permanent" in the table (cancers, chronic pain, depression, peptic ulcer, constipation) are said to remit after a period without claims. casedefs gives the first date only.
+
+## Quan et al. 2005 (Charlson and Elixhauser comorbidities)
+
+**Source:** Quan H, Sundararajan V, Halfon P, et al. Coding algorithms for defining comorbidities in ICD-9-CM and ICD-10 administrative data. Med Care. 2005;43(11):1130-9. The journal article is paywalled. The code tables were read from the copies the Manitoba Centre for Health Policy (MCHP) hosts in its concept dictionary:
+- Charlson: http://mchp-appserv.cpe.umanitoba.ca/concept/Charlson%20Comorbidities%20-%20Coding%20Algorithms%20for%20ICD-9-CM%20and%20ICD-10.pdf
+- Elixhauser: http://mchp-appserv.cpe.umanitoba.ca/concept/Elixhauser%20Comorbidities%20-%20Coding%20Algorithms%20for%20ICD-9-CM%20and%20ICD-10.pdf
+- Quan's ICD-10 Charlson SAS code, published by MCHP with his permission: http://mchp-appserv.cpe.umanitoba.ca/Upload/SAS/ICD10_Charlson.sas.txt
+- Read on: 2026-09-28
+
+casedefs uses the ICD-10 and the "Enhanced ICD-9-CM" columns, which are Quan's own algorithms. Deyo's and Elixhauser's original ICD-9-CM columns are not used.
+
+**Cross-checks:**
+- The Charlson ICD-10 lists match Quan's SAS code exactly. A test compares them, using lists copied from the SAS file by script.
+- Several Quan lists also appear in Tonelli's table (alcohol, heart failure, chronic pulmonary disease, dementia, depression, hypothyroidism, peptic ulcer, rheumatoid arthritis), and they agree.
+
+**Print errors in the MCHP copy**, checked against the page image and, for Charlson, the SAS code:
+- Charlson: "E10.l" is E10.1.
+- Elixhauser ICD-10:
+  - "142.5" is I42.5, and "127.9" is I27.9.
+  - "ROO.O", "ROO.1" and "ROO.8" are R00.0, R00.1 and R00.8.
+  - "Q23.OQ23.3" is Q23.0-Q23.3.
+  - "G 13.x" is G13.x, and "NI9.x" is N19.x.
+  - "Z1 99.2" (with a footnote mark) is Z99.2.
+
+**Rule:** the source gives code lists for hospital discharge abstracts, not a case rule. The definitions count 1 hospital record, any diagnosis field. `comorbidity_score(..., include_claims=True)` also counts physician claims, as the MCHP concept dictionary does.
+
+**Charlson weights:** 1 for groups 1 to 10, 2 for groups 11 to 14, 3 for group 15, and 6 for groups 16 and 17, as in the MCHP `_charlson_total` macro (http://mchp-appserv.cpe.umanitoba.ca/Upload/SAS/_charlson_total.sas.txt). These are the original Charlson weights. The primary papers for updated weights (Quan 2011) and for Elixhauser point weights (van Walraven 2009) are paywalled and weren't read, so casedefs doesn't include them. Elixhauser is scored as a count, as MCHP does.

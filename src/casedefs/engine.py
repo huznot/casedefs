@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .codes import matches_any
-from .definition import ClaimsExclusion, Composite, Definition, Exclusion
+from .definition import ClaimsExclusion, Composite, Definition, Exclusion, PersonExclusion
 
 OUTPUT_COLUMNS = ["person_id", "case_date", "definition_id", "definition_version"]
 CANDIDATE_COLUMNS = ["person_id", "date", "path"]
@@ -27,6 +27,10 @@ class MissingFieldWarning(UserWarning):
     """the definition wants a field (like diagnosis type) that the data does not have."""
 
 
+class IncompleteDefinitionWarning(UserWarning):
+    """part of the published rule is not implemented, so some cases will be missed."""
+
+
 @dataclass
 class Tables:
     """tidy inputs, any of which may be None."""
@@ -36,6 +40,7 @@ class Tables:
     procedures: pd.DataFrame | None = None
     drugs: pd.DataFrame | None = None
     people: pd.DataFrame | None = None
+    ambulatory: pd.DataFrame | None = None
 
 
 def _warn(message: str, category: type[Warning]) -> None:
@@ -76,6 +81,16 @@ def nth_record(events: pd.DataFrame, n: int | None, path: str) -> pd.DataFrame:
     records = events.drop_duplicates(["person_id", "record_id"]).sort_values(["person_id", "date"])
     rank = records.groupby("person_id").cumcount() + 1
     return records.loc[rank >= n, ["person_id", "date"]].assign(path=path)
+
+
+def record_path(events: pd.DataFrame, n: int | None, rule, path: str) -> pd.DataFrame:
+    """dates a person meets n records of one kind, honouring the rule window and gap."""
+    if not n or events.empty:
+        return _empty()
+    if n == 1:
+        return nth_record(events, 1, path)
+    records = events.drop_duplicates(["person_id", "record_id"])
+    return chain_ends(records, "person_id", n, rule.window_days, rule.min_days_between).assign(path=path)
 
 
 def chain_ends(
@@ -189,20 +204,21 @@ def _claims_excluded(first: pd.DataFrame, claims: pd.DataFrame, excl: ClaimsExcl
     return {k[0] for k in ends["key"]}
 
 
-def _hospital_rows(defn: Definition, hospital: pd.DataFrame) -> pd.DataFrame:
-    rows = hospital[match_codes(hospital, defn.icd9, defn.icd10ca, defn.excluded_codes)]
-    if defn.hospital_dx_types:
-        if hospital["dx_type"].notna().any():
-            rows = rows[rows["dx_type"].isin(defn.hospital_dx_types)]
+def _record_rows(defn: Definition, table: pd.DataFrame, dx_types, label: str) -> pd.DataFrame:
+    """rows of a hospital or ambulatory table that count for this definition."""
+    rows = table[match_codes(table, defn.icd9, defn.icd10ca, defn.excluded_codes)]
+    if dx_types:
+        if table["dx_type"].notna().any():
+            rows = rows[rows["dx_type"].isin(dx_types)]
         else:
             _warn(
-                f"{defn.id} only counts hospital diagnosis types {', '.join(defn.hospital_dx_types)} "
-                f"but the hospital data has no dx_type columns, so every diagnosis field was used "
+                f"{defn.id} only counts {label} diagnosis types {', '.join(dx_types)} "
+                f"but the {label} data has no dx_type columns, so every diagnosis field was used "
                 f"(this can overcount)",
                 MissingFieldWarning,
             )
-    if defn.hospital_date == "admission":
-        if hospital["admit_date"].notna().any():
+    if label == "hospital" and defn.hospital_date == "admission":
+        if table["admit_date"].notna().any():
             rows = rows.assign(date=rows["admit_date"].fillna(rows["date"]))
         else:
             _warn(
@@ -213,24 +229,49 @@ def _hospital_rows(defn: Definition, hospital: pd.DataFrame) -> pd.DataFrame:
     return rows
 
 
+def _claims_rows(defn: Definition, claims: pd.DataFrame) -> pd.DataFrame:
+    icd9, icd10 = defn.claims_codes
+    rows = claims[match_codes(claims, icd9, icd10, defn.excluded_codes)]
+    if defn.claims_specialties:
+        if claims["specialty"].notna().any():
+            rows = rows[rows["specialty"].isin([s.upper() for s in defn.claims_specialties])]
+        else:
+            _warn(
+                f"{defn.id} only counts claims from {', '.join(defn.claims_specialties)} physicians "
+                f"but the claims data has no specialty column, so all claims were used (this can overcount)",
+                MissingFieldWarning,
+            )
+    return rows
+
+
+def _present(table: pd.DataFrame | None) -> bool:
+    return table is not None and not table.empty
+
+
 def run(defn: Definition, tables: Tables) -> pd.DataFrame:
     if not defn.verified:
         _warn(
             f"{defn.id} is marked verified=False: see its notes and {defn.source_url} before using results",
             UnverifiedDefinitionWarning,
         )
+    if not defn.complete:
+        _warn(f"{defn.id} is not fully implemented and will miss some cases; run 'casedefs show {defn.id}' "
+              f"for what is missing", IncompleteDefinitionWarning)
     rule = defn.rule
     parts = []
-    if tables.hospital is not None and not tables.hospital.empty and rule.min_hospital:
-        parts.append(nth_record(_hospital_rows(defn, tables.hospital), rule.min_hospital, "hospital"))
-    if tables.claims is not None and not tables.claims.empty and rule.min_claims:
-        icd9, icd10 = defn.claims_codes
-        claims = tables.claims[match_codes(tables.claims, icd9, icd10, defn.excluded_codes)]
+    if _present(tables.hospital) and rule.min_hospital:
+        rows = _record_rows(defn, tables.hospital, defn.hospital_dx_types, "hospital")
+        parts.append(record_path(rows, rule.min_hospital, rule, "hospital"))
+    if _present(tables.claims) and rule.min_claims:
+        claims = _claims_rows(defn, tables.claims)
         parts.append(
             chain_ends(claims, "person_id", rule.min_claims, rule.window_days, rule.min_days_between).assign(
                 path="claims"
             )
         )
+    if _present(tables.ambulatory) and rule.min_ambulatory:
+        rows = _record_rows(defn, tables.ambulatory, defn.ambulatory_dx_types, "ambulatory")
+        parts.append(record_path(rows, rule.min_ambulatory, rule, "ambulatory"))
     if tables.procedures is not None and not tables.procedures.empty and rule.min_procedures:
         procs = tables.procedures
         hit = (
@@ -267,8 +308,14 @@ def run(defn: Definition, tables: Tables) -> pd.DataFrame:
     first = cands.groupby("person_id", as_index=False)["date"].min()
 
     for excl in defn.exclusions:
-        if isinstance(excl, ClaimsExclusion) and tables.claims is not None and not tables.claims.empty:
+        if isinstance(excl, ClaimsExclusion) and _present(tables.claims):
             first = first[~first["person_id"].isin(_claims_excluded(first, tables.claims, excl))]
+        if isinstance(excl, PersonExclusion):
+            excluded = set()
+            for table in (tables.hospital, tables.claims, tables.ambulatory):
+                if _present(table):
+                    excluded |= set(table.loc[match_codes(table, excl.icd9, excl.icd10ca), "person_id"])
+            first = first[~first["person_id"].isin(excluded)]
 
     return _output(first, defn.id, defn.version)
 
@@ -278,13 +325,14 @@ def run_composite(comp: Composite, tables: Tables, get, cache: dict | None = Non
     if not comp.verified:
         _warn(f"{comp.id} is marked verified=False: see its notes", UnverifiedDefinitionWarning)
     cache = {} if cache is None else cache
+    parts = [get(c) if isinstance(c, str) else c for c in comp.components]
     with warnings.catch_warnings():
         # the components warn on their own; the composite sums them up below
         warnings.simplefilter("ignore")
-        for c in comp.components:
-            if c not in cache:
-                cache[c] = run(get(c), tables)
-    found = [cache[c] for c in comp.components]
+        for d in parts:
+            if d.id not in cache:
+                cache[d.id] = run(d, tables)
+    found = [cache[d.id] for d in parts]
     found = [f for f in found if not f.empty]
     if not found:
         return _empty(OUTPUT_COLUMNS)
@@ -292,7 +340,8 @@ def run_composite(comp: Composite, tables: Tables, get, cache: dict | None = Non
     rank = all_cases.groupby("person_id").cumcount() + 1
     reached = all_cases.loc[rank == comp.min_conditions, ["person_id", "case_date"]]
     reached = reached.rename(columns={"case_date": "date"})
-    if tables.people is None:
+    has_ages = any(d.min_age is not None or d.max_age is not None for d in parts)
+    if tables.people is None and has_ages:
         _warn(f"{comp.id}: no people table was given, so component age limits were not checked",
               MissingPeopleWarning)
     reached = _age_filter(reached, tables.people, comp.min_age, comp.max_age, comp.id, comp.age_text())

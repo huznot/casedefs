@@ -9,12 +9,13 @@ class Rule:
 
     a person qualifies on the first date any path is met:
     - at least `min_hospital` hospital records
-    - at least `min_claims` physician claims where the first and last are no
-      more than `window_days` apart, and each claim is at least
-      `min_days_between` days after the one before it
+    - at least `min_claims` physician claims
+    - at least `min_ambulatory` ambulatory care (ed or clinic) records
     - at least `min_procedures` procedure records
     - at least `min_drugs` drug dispensations
-    set a count to None to switch that path off.
+    when a path needs more than one record, the first and last must be no more
+    than `window_days` apart, and each at least `min_days_between` days after
+    the one before it. set a count to None to switch that path off.
     """
 
     min_hospital: int | None = 1
@@ -25,21 +26,27 @@ class Rule:
     hospital_min_age: int | None = None
     min_procedures: int | None = None
     min_drugs: int | None = None
+    min_ambulatory: int | None = None
+
+    def _multi(self, n: int) -> str:
+        text = ""
+        if n > 1 and self.window_days:
+            text += f" within {self.window_days} days"
+        if n > 1 and self.min_days_between:
+            text += f", each at least {self.min_days_between} day(s) after the last"
+        return text
 
     def describe(self) -> str:
         parts = []
         if self.min_hospital:
-            text = f">= {self.min_hospital} hospital record(s)"
+            text = f">= {self.min_hospital} hospital record(s)" + self._multi(self.min_hospital)
             if self.hospital_min_age is not None:
                 text += f" (ages {self.hospital_min_age}+ only)"
             parts.append(text)
         if self.min_claims:
-            text = f">= {self.min_claims} physician claim(s)"
-            if self.min_claims > 1 and self.window_days:
-                text += f" within {self.window_days} days"
-            if self.min_claims > 1 and self.min_days_between:
-                text += f", each at least {self.min_days_between} day(s) after the last"
-            parts.append(text)
+            parts.append(f">= {self.min_claims} physician claim(s)" + self._multi(self.min_claims))
+        if self.min_ambulatory:
+            parts.append(f">= {self.min_ambulatory} ambulatory record(s)" + self._multi(self.min_ambulatory))
         if self.min_procedures:
             parts.append(f">= {self.min_procedures} procedure(s)")
         if self.min_drugs:
@@ -89,6 +96,16 @@ class ClaimsExclusion:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class PersonExclusion:
+    """a person with any record for these codes, at any time, is not a case."""
+
+    name: str
+    icd9: tuple[str, ...]
+    icd10ca: tuple[str, ...]
+    description: str = ""
+
+
 def _age_text(min_age: int | None, max_age: int | None) -> str:
     if min_age is None and max_age is None:
         return "all ages"
@@ -127,7 +144,14 @@ class Definition:
     procedure_ccp: tuple[str, ...] = ()
     procedure_icd9cm: tuple[str, ...] = ()
     drug_dins: tuple[str, ...] = ()
-    exclusions: tuple[Exclusion | ClaimsExclusion, ...] = field(default_factory=tuple)
+    # only claims from these physician specialties count, e.g. ("GP", "GAST")
+    claims_specialties: tuple[str, ...] | None = None
+    # only these ambulatory diagnosis types count, e.g. ("M",)
+    ambulatory_dx_types: tuple[str, ...] | None = None
+    exclusions: tuple[Exclusion | ClaimsExclusion | PersonExclusion, ...] = field(default_factory=tuple)
+    # false when part of the published rule (a lab test, a surgery condition)
+    # is not implemented, so results will be incomplete
+    complete: bool = True
     notes: str = ""
 
     @property
@@ -158,7 +182,8 @@ class Composite:
     source_url: str
     source_location: str
     verified: bool
-    components: tuple[str, ...]
+    # ids of registered definitions, or Definition objects used only here
+    components: tuple
     min_conditions: int
     min_age: int | None = None
     max_age: int | None = None
@@ -189,3 +214,67 @@ def code_range(start: str, end: str) -> tuple[str, ...]:
     if int(lo) > int(hi):
         raise ValueError(f"range is backwards: {start}-{end}")
     return tuple(f"{letters}{n:0{len(lo)}d}" for n in range(int(lo), int(hi) + 1))
+
+
+
+def _split_code(code: str) -> tuple[str, str]:
+    """'I42.5' -> ('I', '425'); '042.x' -> ('', '042'); 'V56.x' -> ('V', '56')."""
+    clean = code.strip().upper().replace(".", "")
+    if clean.endswith("X"):
+        clean = clean[:-1]
+    letters = ""
+    while clean and clean[0].isalpha():
+        letters += clean[0]
+        clean = clean[1:]
+    if not clean.isdigit():
+        raise ValueError(f"not a code: {code!r}")
+    return letters, clean
+
+
+def _prefix_cover(lo: str, hi: str) -> list[str]:
+    """smallest set of prefixes covering every code from lo to hi.
+
+    both are digit strings. lo is padded with 0 and hi with 9 to the same
+    width, then full blocks of ten are folded into their parent.
+    """
+    width = max(len(lo), len(hi))
+    start, stop = int(lo.ljust(width, "0")), int(hi.ljust(width, "9"))
+    if start > stop:
+        raise ValueError(f"range is backwards: {lo}-{hi}")
+    shortest = min(len(lo), len(hi))
+    out: list[str] = []
+    n = start
+    while n <= stop:
+        # grow the block while it stays aligned, inside the range, and no
+        # shorter than the shorter end of the range
+        size, length = 1, width
+        while length > shortest and n % (size * 10) == 0 and n + size * 10 - 1 <= stop:
+            size *= 10
+            length -= 1
+        out.append(str(n // size).zfill(length))
+        n += size
+    return out
+
+
+def expand_codes(text: str) -> tuple[str, ...]:
+    """turn a published code list into prefixes, spelling out ranges.
+
+    'I42.5-I42.9, I43.x, 425.4-425.9, 174.x-195.8' becomes I425 ... I429, I43,
+    4254 ... 4259, 174 ... 194, 1950 ... 1958. this only restates what the list
+    says; it never adds codes.
+    """
+    out: list[str] = []
+    for item in (part.strip() for part in text.replace("–", "-").split(",")):
+        if not item:
+            continue
+        if "-" in item:
+            a, b = (x.strip() for x in item.split("-", 1))
+            la, da = _split_code(a)
+            lb, db = _split_code(b)
+            if la != lb:
+                raise ValueError(f"range ends do not share a prefix: {item}")
+            out += [la + p for p in _prefix_cover(da, db)]
+        else:
+            letters, digits = _split_code(item)
+            out.append(letters + digits)
+    return tuple(dict.fromkeys(out))

@@ -26,7 +26,7 @@ def test_list():
     res = runner.invoke(app, ["list"])
     assert res.exit_code == 0
     assert "ccdss.diabetes" in res.output
-    assert "health-infobase.canada.ca" in res.output
+    assert "99 definitions: ccdss 21" in res.output
 
 
 def test_show():
@@ -147,7 +147,7 @@ def test_run_several_and_all(files):
                               "-o", str(files["out"])])
     assert res.exit_code == 0, res.output
     # repeated warnings are shown once
-    assert res.output.count("no dx_type columns") == 1
+    assert res.output.count("ccdss.ami only counts hospital diagnosis types") == 1
 
 
 def test_run_procedures_and_drugs(tmp_path):
@@ -177,3 +177,51 @@ def test_show_details():
     assert "conditions: ccdss.asthma" in runner.invoke(app, ["show", "ccdss.multimorbidity_3plus"]).output
     park = runner.invoke(app, ["show", "ccdss.parkinsonism"]).output
     assert "hospital ICD" not in park and "claims ICD-10-CA:    F02.3, G20-G22" in park
+
+
+def test_list_source_filter():
+    res = runner.invoke(app, ["list", "--source", "tonelli"])
+    assert res.exit_code == 0
+    assert "tonelli.cirrhosis" in res.output and "ccdss." not in res.output
+    assert "30 definitions" in res.output and "not implemented" in res.output
+    assert runner.invoke(app, ["list", "--source", "nope"]).exit_code == 1
+
+
+def test_run_source_wildcard(files):
+    res = runner.invoke(app, ["run", "quan.charlson.*", "--hospital", str(files["hospital"]), "-o", str(files["out"])])
+    assert res.exit_code == 0, res.output
+    assert "of 17 definitions" in res.output
+    assert runner.invoke(app, ["run", "nope.*", "--hospital", str(files["hospital"]), "-o", str(files["out"])]).exit_code == 1
+
+
+def test_run_ambulatory(tmp_path):
+    src = tmp_path / "a.csv"
+    pd.DataFrame({"person_id": ["1"] * 3, "visit_date": ["2020-01-01", "2020-02-01", "2020-03-01"],
+                  "dx_code": ["J45"] * 3}).to_csv(src, index=False)
+    out = tmp_path / "o.csv"
+    res = runner.invoke(app, ["run", "tonelli.asthma", "--ambulatory", str(src), "-o", str(out)])
+    assert res.exit_code == 0, res.output
+    assert "1 case(s)" in res.output
+
+
+def test_show_tonelli_and_quan():
+    out = runner.invoke(app, ["show", "tonelli.inflammatory_bowel_disease"]).output
+    assert "claims specialties:  GAST, GP" in out
+    out = runner.invoke(app, ["show", "tonelli.chronic_kidney_disease"]).output
+    assert "complete:            NO" in out
+    out = runner.invoke(app, ["show", "tonelli.cirrhosis"]).output
+    assert "tonelli.cirrhosis_part_dx" in out
+    out = runner.invoke(app, ["show", "tonelli.epilepsy"]).output
+    assert "ambulatory dx types: M" in out
+    out = runner.invoke(app, ["show", "tonelli.irritable_bowel_syndrome"]).output
+    assert "exclusion:  other bowel" in out
+
+
+def test_score_command(tmp_path, files):
+    out = tmp_path / "s.csv"
+    res = runner.invoke(app, ["score", "charlson", "--hospital", str(files["hospital"]), "-o", str(out)])
+    assert res.exit_code == 0, res.output
+    got = pd.read_csv(out)
+    assert "score" in got.columns and "diabetes_without_complication" in got.columns
+    res = runner.invoke(app, ["score", "nope", "--hospital", str(files["hospital"]), "-o", str(out)])
+    assert res.exit_code == 1 and "index must be" in res.output

@@ -15,8 +15,13 @@ def all_definitions() -> dict[str, Definition | Composite]:
     found: dict[str, Definition | Composite] = {}
     for mod in pkgutil.walk_packages(definitions.__path__, definitions.__name__ + "."):
         module = importlib.import_module(mod.name)
-        defn = getattr(module, "DEFINITION", None)
-        if isinstance(defn, (Definition, Composite)):
+        # a module holds one DEFINITION, or a DEFINITIONS list for a whole source
+        items = list(getattr(module, "DEFINITIONS", ()))
+        if getattr(module, "DEFINITION", None) is not None:
+            items.append(module.DEFINITION)
+        for defn in items:
+            if not isinstance(defn, (Definition, Composite)):
+                continue
             if defn.id in found:
                 raise RuntimeError(f"two definitions share the id {defn.id!r}")
             found[defn.id] = defn

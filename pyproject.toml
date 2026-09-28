@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "casedefs"
-version = "0.2.0"
+version = "0.3.0"
 description = "Apply validated, published health case definitions to administrative health data."
 readme = "README.md"
 license = "MIT"

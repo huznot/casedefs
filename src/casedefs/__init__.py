@@ -7,12 +7,19 @@ from collections.abc import Mapping, Sequence
 import pandas as pd
 
 from . import engine, inputs
-from .definition import ClaimsExclusion, Composite, Definition, Exclusion, Rule
-from .engine import MissingFieldWarning, MissingPeopleWarning, UnverifiedDefinitionWarning
+from .definition import ClaimsExclusion, Composite, Definition, Exclusion, PersonExclusion, Rule
+from .engine import (
+    IncompleteDefinitionWarning,
+    MissingFieldWarning,
+    MissingPeopleWarning,
+    UnverifiedDefinitionWarning,
+)
 from .inputs import CasedefsInputError
 from .registry import all_definitions, get_definition
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
+
+from .scores import comorbidity_score  # noqa: E402
 
 
 def list_definitions() -> pd.DataFrame:
@@ -38,10 +45,23 @@ def _resolve(definition) -> list[Definition | Composite]:
     if isinstance(definition, (Definition, Composite)):
         return [definition]
     if isinstance(definition, str):
-        if definition == "all":
-            return list(all_definitions().values())
-        return [get_definition(definition)]
-    return [d if isinstance(d, (Definition, Composite)) else get_definition(d) for d in definition]
+        definition = [definition]
+    out: list[Definition | Composite] = []
+    for d in definition:
+        if isinstance(d, (Definition, Composite)):
+            out.append(d)
+        elif d == "all":
+            out += list(all_definitions().values())
+        elif d.endswith(".*"):
+            # a whole source, e.g. "tonelli.*" or "quan.charlson.*"
+            prefix = d[:-1]
+            found = [x for i, x in all_definitions().items() if i.startswith(prefix)]
+            if not found:
+                raise KeyError(f"no definitions start with {prefix!r}")
+            out += found
+        else:
+            out.append(get_definition(d))
+    return list({d.id: d for d in out}.values())
 
 
 def apply(
@@ -51,6 +71,7 @@ def apply(
     people: pd.DataFrame | None = None,
     procedures: pd.DataFrame | None = None,
     drugs: pd.DataFrame | None = None,
+    ambulatory: pd.DataFrame | None = None,
     columns: Mapping[str, object] | None = None,
     claims_coding: str = "icd9",
     hospital_coding: str = "icd10ca",
@@ -59,7 +80,8 @@ def apply(
 ) -> pd.DataFrame:
     """find cases.
 
-    definition is one id ("ccdss.diabetes"), a list of ids, or "all".
+    definition is one id ("ccdss.diabetes"), a whole source ("tonelli.*"), a
+    list of those, or "all".
     returns one row per person and definition: person_id, case_date,
     definition_id, definition_version.
 
@@ -69,8 +91,8 @@ def apply(
     overrides them.
     """
     defs = _resolve(definition)
-    if claims is None and hospital is None and procedures is None and drugs is None:
-        raise CasedefsInputError("pass at least one of claims, hospital, procedures or drugs")
+    if all(t is None for t in (claims, hospital, procedures, drugs, ambulatory)):
+        raise CasedefsInputError("pass at least one of claims, hospital, ambulatory, procedures or drugs")
 
     tables = engine.Tables(
         claims=None if claims is None else inputs.claims_events(claims, columns, claims_coding, date_format),
@@ -79,9 +101,12 @@ def apply(
         else inputs.procedure_events(procedures, columns, procedure_coding, date_format),
         drugs=None if drugs is None else inputs.drug_events(drugs, columns, date_format),
         people=None if people is None else inputs.people_table(people, columns, date_format),
+        ambulatory=None if ambulatory is None
+        else inputs.ambulatory_events(ambulatory, columns, hospital_coding, date_format),
     )
-    aligned = inputs.align_person_ids(tables.claims, tables.hospital, tables.procedures, tables.drugs, tables.people)
-    tables = engine.Tables(*aligned)
+    tables = engine.Tables(*inputs.align_person_ids(
+        tables.claims, tables.hospital, tables.procedures, tables.drugs, tables.people, tables.ambulatory
+    ))
 
     # plain definitions first, so composites can reuse their results
     cache: dict[str, pd.DataFrame] = {}
@@ -100,6 +125,7 @@ def apply(
 
 __all__ = [
     "apply",
+    "comorbidity_score",
     "list_definitions",
     "get_definition",
     "Definition",
@@ -107,6 +133,8 @@ __all__ = [
     "Rule",
     "Exclusion",
     "ClaimsExclusion",
+    "PersonExclusion",
+    "IncompleteDefinitionWarning",
     "CasedefsInputError",
     "UnverifiedDefinitionWarning",
     "MissingPeopleWarning",

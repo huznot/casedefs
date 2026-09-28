@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 
@@ -27,6 +28,10 @@ def matches_any(codes: pd.Series, prefixes: Iterable[str]) -> pd.Series:
     if not clean or codes.empty:
         return pd.Series(False, index=codes.index)
     # real data has far fewer distinct codes than rows, so match those once
+    if isinstance(codes.dtype, pd.CategoricalDtype):
+        hit = np.array([normalize_code(c).startswith(clean) for c in codes.cat.categories] + [False])
+        # code -1 means missing and lands on the trailing False
+        return pd.Series(hit[codes.cat.codes.to_numpy()], index=codes.index)
     distinct = pd.unique(codes.to_numpy())
     hits = {c for c in distinct if normalize_code(c).startswith(clean)}
     return codes.isin(hits)
